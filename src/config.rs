@@ -58,6 +58,9 @@ fn default_bind() -> String {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Capabilities {
+    /// Allow permanent email deletion. Default: false (must explicitly enable).
+    #[serde(default)]
+    pub permanent_delete: bool,
     /// Allow sending emails via mail_send tool. Default: false (must explicitly enable).
     #[serde(default)]
     pub send: bool,

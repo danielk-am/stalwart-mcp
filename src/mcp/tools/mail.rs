@@ -188,6 +188,17 @@ impl StalwartMcp {
         Self::tool_router()
     }
 
+    #[tool(
+        description = "List configured account names and the default account. Use an account name explicitly when working across mailboxes."
+    )]
+    pub async fn mail_list_accounts(&self) -> Result<CallToolResult, ErrorData> {
+        self.rate_limiters.check("mail_list_accounts")?;
+        let json = crate::mcp::resources::accounts_resource(&self.accounts)
+            .await
+            .map_err(ErrorData::from)?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "List mail folders/mailboxes with message counts")]
     pub async fn mail_list_folders(
         &self,
@@ -608,6 +619,12 @@ impl StalwartMcp {
         &self,
         Parameters(args): Parameters<BulkDeleteArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        if !self.capabilities.permanent_delete {
+            return Err(ErrorData::invalid_request(
+                "Permanent deletion is disabled. Enable capabilities.permanent_delete explicitly to allow it.",
+                None,
+            ));
+        }
         self.rate_limiters.check("mail_bulk_delete")?;
 
         if args.ids.is_empty() {

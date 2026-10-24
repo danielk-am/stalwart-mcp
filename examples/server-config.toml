@@ -1,3 +1,7 @@
+# Optional: first connected account is used if omitted.
+# An explicitly selected default that cannot connect stops startup.
+# default_account = "personal"
+
 [[accounts]]
 name = "personal"
 url = "https://mail.example.com"
@@ -12,15 +16,14 @@ username = "user@example.com"
 # username = "user@work.com"
 # password_env = "STALWART_PASSWORD_WORK"
 
-# Optional: first account is used as default if omitted
-# default_account = "personal"
-
 [server]
 bind = "127.0.0.1:3000"
 
 [capabilities]
 # Allow sending emails via mail_send tool (default: false)
 # send = true
+# Allow irreversible deletion via mail_bulk_delete (default: false)
+# permanent_delete = true
 
 [notifications]
 # Enable JMAP EventSource for real-time notifications (default: true)

@@ -2,15 +2,33 @@
 
 A Rust-based [MCP](https://modelcontextprotocol.io/) server for [Stalwart Mail Server](https://stalw.art/). It lets AI assistants access mail via JMAP while keeping your data under your own jurisdiction.
 
-## Why
+## Tracking fork
 
-Existing Gmail and Outlook MCP servers route queries through Google/Microsoft APIs. With stalwart-mcp, AI queries hit **your** Stalwart instance directly. Mail data never leaves your infrastructure; only the AI questions and answers go to the LLM provider.
+Upstream: [webpatser/stalwart-mcp](https://github.com/webpatser/stalwart-mcp), adopted at
+`be2c16d5921f45395996a130a5a643c542ef2105` on 2026-10-24 under AGPL-3.0.
+This fork uses local stdio for Codex. Mail content returned by tools is sent to the assistant's model provider.
+
+Changes: deterministic default-account selection, rejection of duplicate names and unavailable explicit defaults,
+`mail_list_accounts` for tools-only clients, opt-in permanent deletion, and per-object validation of mailbox updates.
+Bulk failures can be partial; refresh affected messages before retrying.
+
+**HTTP transport remains unsuitable for restricted clients:** upstream validates a JWT's signature but does not
+apply its account or scope claims to handlers. This fork has not repaired or verified remote authorization.
+Use stdio with accounts that the local user is authorized to access. Sending, spam training and permanent
+deletion are disabled by default. Mailbox updates and drafts remain available for explicitly requested actions.
+
+Review upstream changes monthly and before updating the installed binary. The upstream-watch CI workflow
+is configured for weekly drift checks; GitHub may require enabling scheduled workflows on a fork.
+Syncing and rerunning the acceptance tests remain maintainer work. Revalidate after
+upstream releases or a failing harness. Run `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`
+and `cargo fmt --check` before replacing a known-good local binary. No live-mail mutation is needed for the fixture tests.
 
 ## Tools
 
 ### Read
 | Tool | Description |
 |------|-------------|
+| `mail_list_accounts` | Discover configured account names and the default |
 | `mail_list_folders` | List mailboxes with message counts |
 | `mail_list_recent` | Recent emails, filtered by folder, date range, unread |
 | `mail_search` | Search by full-text, sender, recipient, subject, date, attachments |
@@ -22,7 +40,7 @@ Existing Gmail and Outlook MCP servers route queries through Google/Microsoft AP
 | `mail_flag` | Mark as read/unread/flagged/unflagged/junk/notjunk (junk auto-moves to Junk folder) |
 | `mail_move` | Move to folder (Archive, Trash, etc.) |
 | `mail_bulk_junk` | Bulk mark emails as junk/notjunk in a single JMAP request |
-| `mail_bulk_delete` | Permanently delete multiple emails in a single JMAP request |
+| `mail_bulk_delete` | Permanently delete multiple emails (requires `capabilities.permanent_delete = true`) |
 | `mail_bulk_read` | Bulk mark emails as read in a single JMAP request |
 | `mail_draft` | Save draft in Drafts folder |
 | `mail_send` | Send email (requires `capabilities.send = true` in config) |
@@ -172,7 +190,11 @@ Add to `.cursor/mcp.json` in your project:
 
 ### Remote mode (HTTP with JWT)
 
-For remote deployment, run as an HTTP server:
+**Unresolved upstream limitation:** account and scope claims are not enforced. The following upstream
+HTTP examples are retained for reference, and are not the supported installation route for this fork.
+Use local stdio until authorization and middleware behavior have been repaired and tested.
+
+The upstream HTTP invocation is:
 
 ```bash
 stalwart-mcp serve --bind 127.0.0.1:3000

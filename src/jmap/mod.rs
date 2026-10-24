@@ -3,7 +3,7 @@ pub mod mail;
 use crate::config::AccountConfig;
 use crate::error::AppError;
 use jmap_client::client::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub struct JmapClient {
@@ -157,6 +157,22 @@ impl AccountManager {
             return Err(AppError::Config("No accounts configured".into()));
         }
 
+        let mut names = HashSet::new();
+        for config in configs {
+            if config.name.trim().is_empty() || !names.insert(config.name.as_str()) {
+                return Err(AppError::Config(
+                    "Account names must be nonempty and unique".into(),
+                ));
+            }
+        }
+        if let Some(name) = default_account
+            && !names.contains(name)
+        {
+            return Err(AppError::Config(format!(
+                "Default account '{name}' is not configured"
+            )));
+        }
+
         let mut accounts = HashMap::new();
         for config in configs {
             match JmapClient::connect(config).await {
@@ -177,10 +193,20 @@ impl AccountManager {
             return Err(AppError::Config("No accounts could be connected".into()));
         }
 
-        let default = default_account
-            .map(String::from)
-            .filter(|name| accounts.contains_key(name))
-            .unwrap_or_else(|| accounts.keys().next().unwrap().clone());
+        let default = match default_account {
+            Some(name) if accounts.contains_key(name) => name.to_string(),
+            Some(name) => {
+                return Err(AppError::Config(format!(
+                    "Default account '{name}' could not be connected"
+                )));
+            }
+            None => configs
+                .iter()
+                .find(|config| accounts.contains_key(&config.name))
+                .expect("At least one account connected")
+                .name
+                .clone(),
+        };
 
         Ok(Self { accounts, default })
     }
@@ -196,13 +222,184 @@ impl AccountManager {
     }
 
     pub fn list(&self) -> Vec<(&str, &Arc<JmapClient>)> {
-        self.accounts
+        let mut accounts: Vec<_> = self
+            .accounts
             .iter()
             .map(|(name, client)| (name.as_str(), client))
-            .collect()
+            .collect();
+        accounts.sort_by_key(|(name, _)| *name);
+        accounts
     }
 
     pub fn default_name(&self) -> &str {
         &self.default
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use serde_json::json;
+
+    async fn fixture() -> (String, tokio::task::JoinHandle<()>) {
+        fixture_with_set_response(json!({})).await
+    }
+
+    async fn fixture_with_set_response(
+        set_response: serde_json::Value,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let session = json!({
+            "capabilities": {"urn:ietf:params:jmap:core": {
+                "maxSizeUpload": 1000000, "maxConcurrentUpload": 4,
+                "maxSizeRequest": 1000000, "maxConcurrentRequests": 4,
+                "maxCallsInRequest": 16, "maxObjectsInGet": 100,
+                "maxObjectsInSet": 100, "collationAlgorithms": []
+            }},
+            "accounts": {"test": {"name": "Fixture", "isPersonal": true,
+                "isReadOnly": false, "accountCapabilities": {}}},
+            "primaryAccounts": {"urn:ietf:params:jmap:mail": "test"},
+            "username": "fixture@example.test", "apiUrl": format!("{base}/jmap"),
+            "downloadUrl": format!("{base}/download/{{accountId}}/{{blobId}}"),
+            "uploadUrl": format!("{base}/upload/{{accountId}}"),
+            "eventSourceUrl": format!("{base}/events"), "state": "fixture"
+        });
+        let app = Router::new()
+            .route("/jmap", post(move || { let response = set_response.clone(); async move {
+                Json(json!({"methodResponses": [["Email/set", response, "s0"]], "sessionState": "fixture"}))
+            }}))
+            .fallback(get(move || { let session = session.clone(); async move { Json(session) } }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, task)
+    }
+
+    fn config(name: &str, url: &str) -> AccountConfig {
+        AccountConfig {
+            name: name.into(),
+            url: url.into(),
+            username: "fixture@example.test".into(),
+            // The fixture ignores credentials. Avoid changing the process environment.
+            password_env: "PATH".into(),
+        }
+    }
+
+    // protects=account isolation; fails_when=hash iteration selects another account;
+    // why_new=no existing multi-account tests.
+    #[tokio::test]
+    async fn default_follows_configuration_order() {
+        let (url, task) = fixture().await;
+        for _ in 0..16 {
+            let manager =
+                AccountManager::connect_all(&[config("first", &url), config("second", &url)], None)
+                    .await
+                    .unwrap();
+            assert_eq!(manager.default_name(), "first");
+        }
+        task.abort();
+    }
+
+    // protects=explicit account selection; fails_when=missing default silently falls back.
+    #[tokio::test]
+    async fn missing_explicit_default_fails_closed() {
+        let (url, task) = fixture().await;
+        let result =
+            AccountManager::connect_all(&[config("available", &url)], Some("missing")).await;
+        assert!(
+            result.is_err(),
+            "An explicit unavailable default must not select a different account"
+        );
+        task.abort();
+    }
+
+    // protects=unique account identity; fails_when=duplicate config overwrites a mailbox.
+    #[tokio::test]
+    async fn duplicate_account_names_are_rejected() {
+        let (url, task) = fixture().await;
+        let result =
+            AccountManager::connect_all(&[config("same", &url), config("same", &url)], None).await;
+        assert!(
+            result.is_err(),
+            "Duplicate account names must not silently replace each other"
+        );
+        task.abort();
+    }
+    // protects=mail retention; fails_when=default configuration permits permanent deletion.
+    #[tokio::test]
+    async fn permanent_delete_requires_explicit_capability() {
+        use crate::config::{Capabilities, NotificationsConfig};
+        use crate::mcp::{StalwartMcp, tools::mail::BulkDeleteArgs};
+        use rmcp::handler::server::wrapper::Parameters;
+        let (url, task) = fixture().await;
+        let manager = AccountManager::connect_all(&[config("fixture", &url)], None)
+            .await
+            .unwrap();
+        let server = StalwartMcp::new(
+            manager,
+            Capabilities::default(),
+            NotificationsConfig::default(),
+            None,
+        );
+        let result = server
+            .mail_bulk_delete(Parameters(BulkDeleteArgs {
+                account: Some("not-configured".into()),
+                ids: vec!["never-delete".into()],
+            }))
+            .await;
+        let error = result.expect_err("Deletion must be disabled by default");
+        assert!(
+            error.message.contains("disabled"),
+            "Capability denial must precede account/network access: {error}"
+        );
+        task.abort();
+    }
+
+    // protects=account discoverability in tools-only clients; fails_when=discovery needs resources.
+    #[test]
+    fn account_discovery_is_available_as_a_tool() {
+        let tools = crate::mcp::StalwartMcp::create_tool_router().list_all();
+        assert!(tools.iter().any(|tool| tool.name == "mail_list_accounts"));
+    }
+    // protects=honest mutation results; fails_when=HTTP 200 hides per-object failures.
+    #[tokio::test]
+    async fn mutation_results_check_each_object() {
+        for succeeds in [false, true] {
+            let response = if succeeds {
+                json!({"accountId":"test", "newState":"after", "updated":{"message":null}, "destroyed":["message"]})
+            } else {
+                json!({"accountId":"test", "newState":"after", "notUpdated":{"message":{"type":"forbidden"}}, "notDestroyed":{"message":{"type":"forbidden"}}})
+            };
+            let (url, task) = fixture_with_set_response(response).await;
+            let client = JmapClient::connect(&config("fixture", &url)).await.unwrap();
+            let ids = vec!["message".to_string()];
+            assert_eq!(
+                client
+                    .set_email_keyword("message", "$seen", true)
+                    .await
+                    .is_ok(),
+                succeeds
+            );
+            assert_eq!(
+                client.move_email("message", "archive").await.is_ok(),
+                succeeds
+            );
+            assert_eq!(
+                client.bulk_keyword(&ids, "$seen", true).await.is_ok(),
+                succeeds
+            );
+            assert_eq!(
+                client
+                    .bulk_keyword_and_move(&ids, "$junk", true, "junk")
+                    .await
+                    .is_ok(),
+                succeeds
+            );
+            assert_eq!(client.bulk_destroy(&ids).await.is_ok(), succeeds);
+            task.abort();
+        }
     }
 }

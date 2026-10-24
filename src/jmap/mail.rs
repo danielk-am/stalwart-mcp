@@ -282,11 +282,14 @@ impl JmapClient {
             .update(email_id)
             .keyword(keyword, set);
 
-        request
+        let mut response = request
             .send_set_email()
             .await
             .map_err(|e| AppError::JmapRequest(e.to_string()))?;
 
+        response
+            .updated(email_id)
+            .map_err(|e| AppError::JmapRequest(e.to_string()))?;
         Ok(())
     }
 
@@ -303,11 +306,14 @@ impl JmapClient {
             .update(email_id)
             .mailbox_ids([target_mailbox_id]);
 
-        request
+        let mut response = request
             .send_set_email()
             .await
             .map_err(|e| AppError::JmapRequest(e.to_string()))?;
 
+        response
+            .updated(email_id)
+            .map_err(|e| AppError::JmapRequest(e.to_string()))?;
         Ok(())
     }
 
@@ -328,12 +334,20 @@ impl JmapClient {
                 .mailbox_ids([target_mailbox_id]);
         }
 
-        request
+        let mut response = request
             .send_set_email()
             .await
             .map_err(|e| AppError::JmapRequest(e.to_string()))?;
 
-        Ok(email_ids.len())
+        let unique_ids: std::collections::HashSet<_> = email_ids.iter().collect();
+        for id in &unique_ids {
+            response.updated(id).map_err(|e| {
+                AppError::JmapRequest(format!(
+                    "Email {id}: {e}. Other items may have succeeded; refresh before retrying."
+                ))
+            })?;
+        }
+        Ok(unique_ids.len())
     }
 
     /// Bulk: set a keyword on multiple emails in one JMAP request (no move)
@@ -350,12 +364,20 @@ impl JmapClient {
             set_req.update(id).keyword(keyword, set);
         }
 
-        request
+        let mut response = request
             .send_set_email()
             .await
             .map_err(|e| AppError::JmapRequest(e.to_string()))?;
 
-        Ok(email_ids.len())
+        let unique_ids: std::collections::HashSet<_> = email_ids.iter().collect();
+        for id in &unique_ids {
+            response.updated(id).map_err(|e| {
+                AppError::JmapRequest(format!(
+                    "Email {id}: {e}. Other items may have succeeded; refresh before retrying."
+                ))
+            })?;
+        }
+        Ok(unique_ids.len())
     }
 
     /// Bulk: permanently destroy multiple emails in one JMAP request
@@ -365,12 +387,20 @@ impl JmapClient {
 
         set.destroy(email_ids);
 
-        request
+        let mut response = request
             .send_set_email()
             .await
             .map_err(|e| AppError::JmapRequest(e.to_string()))?;
 
-        Ok(email_ids.len())
+        let unique_ids: std::collections::HashSet<_> = email_ids.iter().collect();
+        for id in &unique_ids {
+            response.destroyed(id).map_err(|e| {
+                AppError::JmapRequest(format!(
+                    "Email {id}: {e}. Other items may have succeeded; refresh before retrying."
+                ))
+            })?;
+        }
+        Ok(unique_ids.len())
     }
 
     /// Create a draft email

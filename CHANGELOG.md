@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased (tracking fork)
+
+- Add account discovery as a tool.
+- Select defaults in configuration order; reject duplicate names and unavailable explicit defaults.
+- Disable permanent deletion unless explicitly enabled.
+- Validate each JMAP mutation result before reporting success; warn on partial bulk failure.
+- Document stdio-only installation and unresolved upstream HTTP authorization limitations.
+
 ## [0.2.0] - 2026-04-15
 
 ### Added

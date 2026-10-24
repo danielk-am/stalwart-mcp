@@ -49,6 +49,7 @@ impl Default for RateLimiters {
 impl RateLimiters {
     pub fn new() -> Self {
         let mut limiters = HashMap::new();
+        limiters.insert("mail_list_accounts", TokenBucket::new(60));
         limiters.insert("mail_list_folders", TokenBucket::new(60));
         limiters.insert("mail_list_recent", TokenBucket::new(60));
         limiters.insert("mail_search", TokenBucket::new(30));
